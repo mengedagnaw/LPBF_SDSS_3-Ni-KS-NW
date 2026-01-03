@@ -1,0 +1,478 @@
+function T = KSNW_core(rootDir, condFolder, outDir, tolDeg, opts)
+% KSNW_core.m
+% Robust KS/NW interphase OR analysis for duplex EBSD (.ang) in MTEX 6.1+
+%
+% Computes KS and NW "fraction of interphase boundary segments within tolDeg"
+% using grain-mean orientations on alpha/gamma interphase boundaries.
+%
+% INPUTS
+%   rootDir    : e.g. "/MATLAB Drive/SDSS 2507_EBSD"
+%   condFolder : e.g. "01_AS_hex"
+%   outDir     : e.g. "/MATLAB Drive/SDSS 2507_EBSD/OR_KS_NW_outputs/AS"
+%   tolDeg     : tolerance in degrees (e.g. 5)
+%   opts       : struct with optional fields (see defaults below)
+%
+% OUTPUT
+%   T : 1-row table summary for this condition
+
+arguments
+  rootDir (1,1) string
+  condFolder (1,1) string
+  outDir (1,1) string
+  tolDeg (1,1) double = 5
+  opts.grainAngDeg (1,1) double = 5           % grain reconstruction angle
+  opts.minInterphaseSeg (1,1) double = 50      % minimum interphase segments
+  opts.phaseFCC (1,1) string = ""              % if you want to force a name, set it
+  opts.phaseBCC (1,1) string = ""
+  opts.doMaps (1,1) logical = true
+  opts.doHists (1,1) logical = true
+  opts.figVisible (1,1) logical = false
+  opts.exportDPI (1,1) double = 300
+end
+
+% -----------------------------
+% Basic paths / IO
+% -----------------------------
+condPath = rootDir + "/" + condFolder;
+angFile  = condPath + "/0.ang";
+
+if ~isfolder(condPath)
+  error("Condition folder not found: %s", condPath);
+end
+if ~isfile(angFile)
+  error("EBSD file not found: %s", angFile);
+end
+
+if ~isfolder(outDir)
+  mkdir(outDir);
+end
+
+condName = local_condition_name(condFolder);
+
+fprintf("\n=============================\n");
+fprintf("Condition: %s\n", condName);
+fprintf("Folder   : %s\n", condPath);
+fprintf("File     : %s\n", angFile);
+
+% -----------------------------
+% Load EBSD
+% -----------------------------
+ebsd = EBSD.load(char(angFile), 'interface','ang');
+ebsd = ebsd('indexed');
+
+if isempty(ebsd)
+  warning("No indexed EBSD in %s. Skipping.", condName);
+  T = local_empty_row(condName, angFile, tolDeg);
+  local_write_one_csv(T, outDir, condName);
+  return;
+end
+
+% -----------------------------
+% Pick phases (robust)
+% -----------------------------
+[fccName, bccName] = local_pick_phase_names(ebsd, opts.phaseFCC, opts.phaseBCC);
+
+ebsdFCC = ebsd(char(fccName));
+ebsdBCC = ebsd(char(bccName));
+
+fprintf("Detected FCC: %s (%d pts)\n", fccName, numel(ebsdFCC));
+fprintf("Detected BCC: %s (%d pts)\n", bccName, numel(ebsdBCC));
+
+if isempty(ebsdFCC) || isempty(ebsdBCC)
+  warning("Missing one phase in %s (FCC=%d, BCC=%d). Skipping.", condName, numel(ebsdFCC), numel(ebsdBCC));
+  T = local_empty_row(condName, angFile, tolDeg);
+  local_write_one_csv(T, outDir, condName);
+  return;
+end
+
+% -----------------------------
+% Grains + interphase boundaries
+% -----------------------------
+[grains, ebsd.grainId] = calcGrains(ebsd, 'angle', opts.grainAngDeg*degree);
+
+% Interphase boundary object
+gB = grains.boundary(char(bccName), char(fccName));
+if isempty(gB)
+  % Try swapped order (some MTEX builds are picky)
+  gB = grains.boundary(char(fccName), char(bccName));
+end
+
+nGB = numel(gB);
+if nGB < opts.minInterphaseSeg
+  warning("Too few interphase boundary segments in %s (n=%d). Skipping.", condName, nGB);
+  T = local_empty_row(condName, angFile, tolDeg);
+  local_write_one_csv(T, outDir, condName);
+  return;
+end
+
+% Weights (segment length if available)
+w = local_boundary_weights(gB);
+
+% Grain IDs on each side
+ids = gB.grainId;  % Nx2
+g1  = grains(ids(:,1));
+g2  = grains(ids(:,2));
+
+% Identify which side is BCC vs FCC using grains(phaseName)
+pidBCC = unique(grains(char(bccName)).phaseId);
+pidFCC = unique(grains(char(fccName)).phaseId);
+pidBCC = pidBCC(1); pidFCC = pidFCC(1);
+
+isBCC_first = (g1.phaseId == pidBCC);
+
+% Mean orientations of grains
+ori1 = g1.meanOrientation;
+ori2 = g2.meanOrientation;
+
+% Assign BCC and FCC consistently per segment
+oriBCC = ori1; oriFCC = ori2;
+oriBCC(~isBCC_first) = ori2(~isBCC_first);
+oriFCC(~isBCC_first) = ori1(~isBCC_first);
+
+% Convert to rotations (no symmetry-mismatch explosions)
+rBCC = local_to_rotation(oriBCC);
+rFCC = local_to_rotation(oriFCC);
+
+% Measured rotation mapping BCC -> FCC:
+% specimen = O_BCC * v_BCC = O_FCC * v_FCC  => v_FCC = inv(O_FCC)*O_BCC*v_BCC
+rMeas = inv(rFCC) * rBCC;
+
+% -----------------------------
+% Build KS/NW variant rotations
+% -----------------------------
+csBCC = grains(char(bccName)).CS;
+csFCC = grains(char(fccName)).CS;
+
+varsKS = local_make_variants_KS(csBCC, csFCC);
+varsNW = local_make_variants_NW(csBCC, csFCC);
+
+% -----------------------------
+% Deviations + fractions
+% -----------------------------
+devKS = local_min_dev_deg(rMeas, varsKS);
+devNW = local_min_dev_deg(rMeas, varsNW);
+
+fracKS = sum(w(devKS <= tolDeg)) / sum(w);
+fracNW = sum(w(devNW <= tolDeg)) / sum(w);
+
+fprintf("K-S: weighted fraction within %.2f deg = %.3f\n", tolDeg, fracKS);
+fprintf("N-W: weighted fraction within %.2f deg = %.3f\n", tolDeg, fracNW);
+
+% -----------------------------
+% Figures
+% -----------------------------
+if opts.doHists
+  local_histogram(devKS, tolDeg, outDir + "/" + condName + "_hist_KS.png", opts);
+  local_histogram(devNW, tolDeg, outDir + "/" + condName + "_hist_NW.png", opts);
+end
+
+if opts.doMaps
+  local_boundary_map(gB, devKS, tolDeg, outDir + "/" + condName + "_map_KS.png", opts, "KS");
+  local_boundary_map(gB, devNW, tolDeg, outDir + "/" + condName + "_map_NW.png", opts, "NW");
+end
+
+% -----------------------------
+% Output row
+% -----------------------------
+T = table( ...
+  string(condName), string(angFile), string(fccName), numel(ebsdFCC), string(bccName), numel(ebsdBCC), ...
+  nGB, fracKS, fracNW, tolDeg, ...
+  'VariableNames', {'Condition','File','PhaseFCC','nFCC','PhaseBCC','nBCC','nGBseg','FracKS_tol','FracNW_tol','tol_deg'} );
+
+local_write_one_csv(T, outDir, condName);
+
+end % main
+
+
+% ============================================================
+% Helpers
+% ============================================================
+
+function condName = local_condition_name(condFolder)
+% "01_AS_hex" -> "AS"
+tok = regexp(condFolder, '^\d+_([^_]+)_', 'tokens', 'once');
+if ~isempty(tok)
+  condName = tok{1};
+else
+  condName = char(condFolder);
+end
+end
+
+function T = local_empty_row(condName, angFile, tolDeg)
+T = table(string(condName), string(angFile), "", 0, "", 0, 0, NaN, NaN, tolDeg, ...
+  'VariableNames', {'Condition','File','PhaseFCC','nFCC','PhaseBCC','nBCC','nGBseg','FracKS_tol','FracNW_tol','tol_deg'});
+end
+
+function local_write_one_csv(T, outDir, condName)
+csvFile = outDir + "/" + string(condName) + "_KS_NW_summary.csv";
+writetable(T, csvFile);
+end
+
+function [fccName, bccName] = local_pick_phase_names(ebsd, forceFCC, forceBCC)
+% Robust phase name extraction without categories()/CSList dot indexing.
+% Uses ebsd.mineralList if available; else falls back to phaseId-based scan.
+
+if strlength(forceFCC) > 0 && strlength(forceBCC) > 0
+  fccName = forceFCC; bccName = forceBCC;
+  return;
+end
+
+names = strings(0,1);
+try
+  names = string(ebsd.mineralList);
+catch
+  % fallback: brute force common duplex names
+  names = ["Austenite","Ferrite","Ferryt","Ferrite-like","gamma","alpha"];
+end
+
+names = names(names ~= "notIndexed" & names ~= "");
+low = lower(names);
+
+% Heuristics
+fccCand = names(contains(low,"aust") | contains(low,"gamma") | contains(low,"fcc"));
+bccCand = names(contains(low,"ferr") | contains(low,"alpha") | contains(low,"bcc") | contains(low,"delta"));
+
+% If still empty, pick top-2 by population
+if isempty(fccCand) || isempty(bccCand)
+  % Count points by name (best-effort)
+  best = [];
+  counts = zeros(numel(names),1);
+  for i = 1:numel(names)
+    try
+      counts(i) = numel(ebsd(char(names(i))));
+    catch
+      counts(i) = 0;
+    end
+  end
+  [~,idx] = sort(counts,'descend');
+  best = names(idx);
+  if isempty(fccCand), fccCand = best(1); end
+  if isempty(bccCand)
+    if numel(best) >= 2, bccCand = best(2); else, bccCand = best(1); end
+  end
+end
+
+fccName = fccCand(1);
+bccName = bccCand(1);
+
+% If user forced one of them
+if strlength(forceFCC)>0, fccName = forceFCC; end
+if strlength(forceBCC)>0, bccName = forceBCC; end
+
+end
+
+function w = local_boundary_weights(gB)
+% Use segment length if available
+try
+  if isprop(gB,'segLength')
+    w = gB.segLength;
+  elseif isprop(gB,'length')
+    w = gB.length;
+  else
+    w = ones(numel(gB),1);
+  end
+catch
+  w = ones(numel(gB),1);
+end
+
+w = w(:);
+if all(w==0), w = ones(size(w)); end
+end
+
+function r = local_to_rotation(ori)
+% Convert MTEX orientation -> rotation safely
+try
+  r = rotation(ori);
+catch
+  % Some builds expose .rot
+  try
+    r = ori.rot;
+  catch
+    error("Could not convert orientation to rotation (MTEX conversion failed).");
+  end
+end
+end
+
+function ops = local_sym_ops(cs)
+% Get symmetry operators robustly across MTEX builds
+ops = [];
+try
+  if isprop(cs,'rotations')
+    ops = cs.rotations;
+  end
+catch, end
+if isempty(ops)
+  try
+    if isprop(cs,'rot')
+      ops = cs.rot;
+    end
+  catch, end
+end
+if isempty(ops)
+  try
+    ops = symmetry(cs);
+  catch
+    error("Could not access symmetry operators for crystalSymmetry.");
+  end
+end
+
+% Convert to rotation array if needed
+try
+  ops = rotation(ops);
+catch
+  % If already rotation, fine
+end
+end
+
+function r0 = local_rot_from_two_vectors(a1, a2, b1, b2)
+% Build rotation matrix R such that R*a1=b1 and R*a2=b2 using orthonormal bases
+a1 = a1(:); a2 = a2(:); b1 = b1(:); b2 = b2(:);
+A1 = a1 / norm(a1);
+A2 = a2 - dot(a2,A1)*A1; A2 = A2 / norm(A2);
+A3 = cross(A1,A2);
+
+B1 = b1 / norm(b1);
+B2 = b2 - dot(b2,B1)*B1; B2 = B2 / norm(B2);
+B3 = cross(B1,B2);
+
+R = [B1 B2 B3] * [A1 A2 A3]';
+
+% Make MTEX rotation from matrix
+try
+  r0 = rotation('matrix', R);
+catch
+  try
+    r0 = rotation.byMatrix(R);
+  catch
+    r0 = rotation(R); % last resort
+  end
+end
+end
+
+function vars = local_unique_rotations(vars, angTolDeg)
+% Remove duplicates by angular closeness
+keep = true(1,numel(vars));
+for i = 1:numel(vars)
+  if ~keep(i), continue; end
+  for j = i+1:numel(vars)
+    if ~keep(j), continue; end
+    try
+      d = angle(vars(i), vars(j)) / degree;
+    catch
+      d = angle(inv(vars(j))*vars(i)) / degree;
+    end
+    if d < angTolDeg
+      keep(j) = false;
+    end
+  end
+end
+vars = vars(keep);
+end
+
+function vars = local_expand_variants(r0, csBCC, csFCC)
+sB = local_sym_ops(csBCC);
+sF = local_sym_ops(csFCC);
+
+k = 0;
+vars = rotation.empty;
+for i = 1:numel(sF)
+  for j = 1:numel(sB)
+    k = k + 1;
+    vars(k) = sF(i) * r0 * inv(sB(j));
+  end
+end
+
+% De-duplicate (very important)
+vars = local_unique_rotations(vars, 0.05); % deg
+end
+
+function varsKS = local_make_variants_KS(csBCC, csFCC)
+% KS definition: (111)γ || (110)α  and  [1 -1 0]γ || [1 -1 1]α
+% We build r0 mapping BCC->FCC using two vector correspondences.
+
+a_n = [1; 1; 0];   % (110)_alpha normal (direction in alpha)
+b_n = [1; 1; 1];   % (111)_gamma normal
+
+a_d = [1; -1; 1];  % <111>_alpha (chosen to be in (110): dot=0)
+b_d = [1; -1; 0];  % <110>_gamma (in (111): dot=0)
+
+r0 = local_rot_from_two_vectors(a_n, a_d, b_n, b_d);
+varsKS = local_expand_variants(r0, csBCC, csFCC);
+end
+
+function varsNW = local_make_variants_NW(csBCC, csFCC)
+% NW definition (common form):
+% (111)γ || (110)α  and  [110]γ || [001]α
+% Build r0 mapping BCC->FCC.
+
+a_n = [1; 1; 0];   % (110)_alpha normal
+b_n = [1; 1; 1];   % (111)_gamma normal
+
+a_d = [0; 0; 1];   % [001]_alpha
+b_d = [1; 1; 0];   % [110]_gamma
+
+r0 = local_rot_from_two_vectors(a_n, a_d, b_n, b_d);
+varsNW = local_expand_variants(r0, csBCC, csFCC);
+end
+
+function dmin = local_min_dev_deg(rMeas, vars)
+% Minimum angular deviation between each measured rotation and a set of variants
+n = numel(rMeas);
+dmin = inf(n,1);
+
+for k = 1:numel(vars)
+  try
+    dk = angle(rMeas, vars(k)) / degree;
+  catch
+    % fallback: compare relative rotation
+    dk = angle(inv(vars(k)) * rMeas) / degree;
+  end
+  dk = dk(:);
+  dmin = min(dmin, dk);
+end
+end
+
+function local_histogram(devDeg, tolDeg, outPng, opts)
+fig = figure('Visible', local_vis(opts.figVisible));
+set(fig,'Color','w','ToolBar','none','MenuBar','none');
+
+histogram(devDeg, 60);
+xlabel('Deviation (deg)');
+ylabel('Count');
+title(sprintf('Deviation histogram (tol = %.2f°)', tolDeg));
+
+grid on;
+local_export_png(fig, outPng, opts.exportDPI);
+close(fig);
+end
+
+function local_boundary_map(gB, devDeg, tolDeg, outPng, opts, tag)
+fig = figure('Visible', local_vis(opts.figVisible));
+set(fig,'Color','w','ToolBar','none','MenuBar','none');
+
+% Plot boundaries colored by deviation
+plot(gB, devDeg, 'LineWidth', 2);
+cb = colorbar;
+ylabel(cb,'Deviation (deg)');
+title(sprintf('%s boundary map (tol = %.2f°)', tag, tolDeg));
+
+% Tight look
+axis tight;
+set(gca,'Visible','off');
+
+local_export_png(fig, outPng, opts.exportDPI);
+close(fig);
+end
+
+function local_export_png(fig, filename, dpi)
+try
+  exportgraphics(fig, char(filename), 'Resolution', dpi);
+catch
+  % fallback
+  print(fig, char(filename), '-dpng', sprintf('-r%d', dpi));
+end
+end
+
+function v = local_vis(isVisible)
+if isVisible, v = 'on'; else, v = 'off'; end
+end
