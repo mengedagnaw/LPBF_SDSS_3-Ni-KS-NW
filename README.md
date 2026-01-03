@@ -16,3 +16,18 @@ The workflow:
 
 ## Repository structure (recommended)
 
+SDSS 2507_EBSD/
+├─ 01_AS_hex/0.ang
+├─ 02_SR400_hex/0.ang
+├─ 03_SR450_hex/0.ang
+├─ 04_SR500_hex/0.ang
+├─ 05_SR550_hex/0.ang
+├─ 06_SA1100_hex/0.ang
+└─ MTEX MATLAB scripts/
+├─ KSNW_core.m
+├─ KSNW_AS.m
+├─ KSNW_SR400.m
+├─ KSNW_SR450.m
+├─ KSNW_SR500.m
+├─ KSNW_SR550.m
+└─ KSNW_SA1100.m
