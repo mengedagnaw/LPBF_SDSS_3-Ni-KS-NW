@@ -54,3 +54,10 @@ Output folders are created automatically, e.g.:
 1) Open MATLAB and change directory:
 ```matlab
 cd("/MATLAB Drive/SDSS 2507_EBSD/MTEX MATLAB scripts")
+
+KSNW_AS
+KSNW_SR400
+KSNW_SR450
+KSNW_SR500
+KSNW_SR550
+KSNW_SA1100
