@@ -31,3 +31,26 @@ SDSS 2507_EBSD/
 ├─ KSNW_SR500.m
 ├─ KSNW_SR550.m
 └─ KSNW_SA1100.m
+
+
+Output folders are created automatically, e.g.:
+- `OR_KS_NW_outputs/`
+- (optional) sensitivity folders you define in a sweep script
+
+---
+
+## Requirements
+
+- MATLAB (R2020b+ recommended)
+- MTEX (tested with **MTEX 6.1.0**)
+- EBSD data in `.ang` format
+
+> MTEX must be on the MATLAB path. If you keep MTEX inside the project, the scripts can initialize it automatically via `mtexDir`.
+
+---
+
+## How to run (per condition)
+
+1) Open MATLAB and change directory:
+```matlab
+cd("/MATLAB Drive/SDSS 2507_EBSD/MTEX MATLAB scripts")
