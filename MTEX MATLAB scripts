@@ -1,3 +1,6 @@
+# (the engine, full code)
+
+
 function rowT = KSNW_core(rootDir, condFolder, condLabel, outDir, tolDeg, phaseBCC, phaseFCC, grainAngDeg, doPNGs, mtexDir)
 % KSNW_core
 % Robust KS/NW interphase-boundary analysis for MTEX (EBSD .ang)
